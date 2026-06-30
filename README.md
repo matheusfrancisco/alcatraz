@@ -10,6 +10,14 @@ invoked in-process** no service, no network, no models to download.
 > not stable and may change between releases, including breaking changes. Pin a
 > specific version and review the release notes before upgrading.
 
+> [!NOTE]
+> **Detection is pattern-based only — there is no machine-learning engine yet.**
+> No NER (named-entity recognition) and no LLM models. Entities that need a
+> statistical model (e.g. `PERSON`, `LOCATION`, `NRP`) are **not** detected
+> today. This is planned, not fundamental: the `analyzer.Recognizer` interface
+> is the seam where such backends will plug in. See [TODO.md](TODO.md) for the
+> roadmap.
+
 ```go
 eng := alcatraz.NewEngine()
 for _, hit := range eng.Analyze("email me at jane@example.com", alcatraz.Options{}) {
@@ -171,9 +179,11 @@ compose seamlessly through the same `Engine`.
 
 ## Limitations
 
-- **No free-text NER.** Entities that need a statistical model — `PERSON`,
-  `LOCATION`, `NRP` — are out of scope. Constants exist for them, but no
-  built-in recognizer emits them.
+- **No ML engine yet — pattern-based only.** There is no NER or LLM backend, so
+  entities that need a statistical model (`PERSON`, `LOCATION`, `NRP`) are not
+  emitted, even though constants exist for them. This is planned, not
+  fundamental — `analyzer.Recognizer` is the integration seam; see
+  [TODO.md](TODO.md).
 - **Default threshold is 0.** Some recognizers are intentionally low-confidence
   (e.g. `US_BANK_NUMBER` at 0.05 for any 8–17 digit run). Set `Options.Threshold`
   to trade recall for precision.
