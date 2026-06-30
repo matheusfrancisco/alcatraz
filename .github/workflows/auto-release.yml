@@ -39,16 +39,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Repo policy is squash-merge only, so the merge commit subject always
-          # ends with `(#NNNN)`. Anchor the match to end-of-line so an issue
-          # reference earlier in the subject doesn't get picked up instead.
-          SUBJECT=$(git log -1 --pretty=%s "$SHA")
-          PR_NUMBER=$(echo "$SUBJECT" | sed -nE 's/.*\(#([0-9]+)\)$/\1/p')
+          # Ask GitHub which PR this pushed commit belongs to, rather than
+          # parsing the commit subject. This is merge-strategy agnostic (works
+          # for squash, merge-commit and rebase) and returns empty for a direct
+          # push to main, which we treat as "nothing to release".
+          PR_NUMBER=$(gh api "repos/${REPO}/commits/${SHA}/pulls" --jq '.[0].number // ""')
 
           if [ -z "$PR_NUMBER" ]; then
-            echo "::error::Could not parse PR number from merge commit subject: ${SUBJECT}"
-            echo "::error::Direct push to main, or repo merge settings allow rebase/merge-commit (squash-merge is required)?"
-            exit 1
+            echo "No PR is associated with ${SHA} (direct push to main?). Nothing to release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           LABELS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name')
