@@ -49,10 +49,10 @@ validator. The pipeline mirrors Presidio:
 4. An optional score threshold and allow list are applied.
 5. Each surviving result is annotated with the matched substring (`Result.Text`).
 
-21 of the 40 recognizers carry a real validator — Luhn (credit cards), ISO 7064
-mod-97 (IBAN), Verhoeff (Aadhaar), and the various national weighted-modulus and
-check-letter schemes — so structured identifiers are verified, not just
-shape-matched.
+25 of the 45 recognizers carry a real validator — Luhn (credit cards), ISO 7064
+mod-97 (IBAN), Verhoeff (Aadhaar), the Brazilian mod-11 schemes (CPF, CNPJ,
+CNH, PIS), and the various national weighted-modulus and check-letter schemes —
+so structured identifiers are verified, not just shape-matched.
 
 ## API
 
@@ -75,7 +75,7 @@ for _, r := range results {
 `Options{}` (the zero value) analyzes English text with every recognizer and no
 threshold. `Result` offsets are byte indices, so `text[r.Start:r.End] == r.Text`.
 
-## Supported entities (40)
+## Supported entities (45)
 
 | Group | Entity types |
 |-------|--------------|
@@ -87,6 +87,7 @@ threshold. `Result` offsets are byte indices, so `text[r.Start:r.End] == r.Text`
 | Italy | `IT_FISCAL_CODE`✓, `IT_VAT_CODE`✓, `IT_IDENTITY_CARD`, `IT_DRIVER_LICENSE`, `IT_PASSPORT` |
 | Spain | `ES_NIF`✓, `ES_NIE`✓ |
 | Singapore | `SG_FIN`✓, `SG_UEN` |
+| Brazil | `BR_CPF`✓, `BR_CNPJ`✓, `BR_RG`, `BR_CNH`✓, `BR_PIS`✓ |
 | Other | `PL_PESEL`✓, `KR_RRN`✓, `FI_PERSONAL_IDENTITY_CODE`✓, `TH_TNIN`✓ |
 
 ✓ = checksum/format validated. Constants live in the `entities` package.
