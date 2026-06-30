@@ -74,6 +74,15 @@ const (
 	SGUEN = "SG_UEN"
 )
 
+// Brazil.
+const (
+	BRCPF  = "BR_CPF"
+	BRCNPJ = "BR_CNPJ"
+	BRRG   = "BR_RG"
+	BRCNH  = "BR_CNH"
+	BRPIS  = "BR_PIS" // also PASEP / NIS / NIT
+)
+
 // Other national identifiers.
 const (
 	PLPESEL                = "PL_PESEL"
