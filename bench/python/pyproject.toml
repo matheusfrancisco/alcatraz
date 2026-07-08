@@ -1,0 +1,12 @@
+[project]
+name = "presidio-bench"
+version = "0.1.0"
+description = "Benchmark harness: local presidio-analyzer checkout vs Alcatraz"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "presidio-analyzer",
+]
+
+[tool.uv.sources]
+# Benchmark the local fork, not the PyPI release.
+presidio-analyzer = { path = "../../../presidio/presidio-analyzer", editable = true }
