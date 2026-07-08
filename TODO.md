@@ -54,10 +54,10 @@ lives in a **separate module** so importers of the core never pull the dep.
       Face, verified against the published LFS sha256) — users need neither
       cmake nor a manual download. `pfilter/dist` builds one self-contained
       shared library (ggml linked statically, force-loaded pf archive).
-- [ ] `pfilter`: publish the first `libpf-v1` release (run
-      `libpf-release.yml`), then pin its checksums.txt values in
-      `pfilter/download.go:libraryChecksums`. Until then `EnsureLibrary`
-      returns "no prebuilt libpf" and users build via `pfilter/dist`.
+- [x] `pfilter`: `libpf-v1` published (all four platforms built + smoke-
+      tested by `libpf-release.yml`) and its checksums pinned in
+      `pfilter/download.go:libraryChecksums` — `EnsureLibrary` verified end
+      to end against the release (download, hash check, dlopen, inference).
 - [x] `pfilter`: ctx pool instead of one mutex-guarded pf_ctx —
       `Config.PoolSize` (default 1) contexts behind a channel pool; classify
       calls run in parallel up to the pool size, Close waits for in-flight
