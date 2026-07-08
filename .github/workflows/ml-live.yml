@@ -1,0 +1,125 @@
+# End-to-end tests for the ML backends with real models. Heavy (C++ build +
+# 1.6 GB GGUF download on a cold cache), so it does not run on every push:
+# it triggers on PRs touching the ML modules, weekly, and on demand. Fast
+# unit tests for all modules run in test.yml on every push.
+name: ML live tests
+
+on:
+  pull_request:
+    paths:
+      - "ner/**"
+      - "pfilter/**"
+      - "analyzer/nlp*.go"
+      - ".github/workflows/ml-live.yml"
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ml-live-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin the privacy-filter.cpp revision so a cached libpf build stays valid
+  # and upstream changes land here deliberately (bump + green run).
+  PF_REF: 735a6c28607ee82afc3a670383f41b55266a3b9a
+  # LocalAI-io/privacy-filter-GGUF q8 artifact (~1.6 GB); the sha256 is the
+  # published LFS object id, verified after download.
+  PF_MODEL_URL: https://huggingface.co/LocalAI-io/privacy-filter-GGUF/resolve/main/privacy-filter-q8.gguf
+  PF_MODEL_SHA256: 80efc1803eda7c095a79741d2008c07e2e0a57b01bac8825fbeb448fd097998c
+
+jobs:
+  # ner: pure Go, needs only the ONNX model (~250 MB, cached).
+  ner-live:
+    name: ner live (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: ner/go.sum
+
+      - name: Cache NER model
+        uses: actions/cache@v4
+        with:
+          # ner.ensureModel stores models under the user cache dir.
+          path: |
+            ~/.cache/alcatraz/models
+            ~/Library/Caches/alcatraz/models
+          key: ner-model-${{ runner.os }}-v1
+
+      - name: Live model test
+        working-directory: ner
+        env:
+          ALCATRAZ_NER_LIVE: "1"
+        run: go test -v -run TestLiveNER -timeout 25m ./...
+
+  # pfilter: needs libpf (built from the pinned privacy-filter.cpp revision
+  # via the pfilter/dist CMake wrapper, cached) and a GGUF (cached).
+  pfilter-live:
+    name: pfilter live (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: pfilter/go.sum
+
+      - name: Cache libpf
+        id: libpf
+        uses: actions/cache@v4
+        with:
+          path: libpf-out
+          key: libpf-${{ matrix.os }}-${{ env.PF_REF }}-${{ hashFiles('pfilter/dist/**') }}
+
+      - name: Build libpf
+        if: steps.libpf.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/localai-org/privacy-filter.cpp pf-src
+          git -C pf-src checkout "$PF_REF"
+          git -C pf-src submodule update --init --recursive --depth 1
+          cmake -S pfilter/dist -B pf-build \
+            -DPF_SOURCE_DIR="$PWD/pf-src" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF
+          cmake --build pf-build -j4
+          mkdir -p libpf-out
+          cp pf-build/libpf.dylib libpf-out/ 2>/dev/null || cp pf-build/libpf.so libpf-out/
+
+      - name: Cache GGUF model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: privacy-filter-q8.gguf
+          key: pf-gguf-q8-${{ env.PF_MODEL_SHA256 }}
+
+      - name: Download GGUF model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: curl -fsSL -o privacy-filter-q8.gguf "$PF_MODEL_URL"
+
+      - name: Verify model checksum
+        run: echo "$PF_MODEL_SHA256  privacy-filter-q8.gguf" | shasum -a 256 -c
+
+      - name: Live FFI test
+        working-directory: pfilter
+        env:
+          ALCATRAZ_PF_LIVE: "1"
+          PF_MODEL: ${{ github.workspace }}/privacy-filter-q8.gguf
+        run: |
+          lib=$(ls "$GITHUB_WORKSPACE"/libpf-out/libpf.*)
+          PF_LIBRARY="$lib" go test -v -run TestLivePrivacyFilter -timeout 30m ./...

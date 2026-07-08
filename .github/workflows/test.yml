@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
       - name: Check formatting
         run: |
           out=$(gofmt -l .)
@@ -27,15 +27,17 @@ jobs:
           fi
 
   test:
-    # The repo has two modules (root + lookaround); a single `./...` from the
-    # root does not cross the module boundary, so each module is tested on its
-    # own. lookaround resolves the parent via the local `replace` in its go.mod.
+    # The repo has four modules (root + lookaround + ner + pfilter); a single
+    # `./...` from the root does not cross module boundaries, so each module is
+    # tested on its own. Submodules resolve the parent via the local `replace`
+    # in their go.mod. ner and pfilter unit tests need no model or shared
+    # library — the live end-to-end tests run in ml-live.yml instead.
     name: Test (${{ matrix.module }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        module: [".", "lookaround"]
+        module: [".", "lookaround", "ner", "pfilter"]
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -43,6 +45,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
       - run: go vet ./...
       - run: go test -race ./...
