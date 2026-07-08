@@ -105,12 +105,12 @@ var libraryBaseURL = "https://github.com/hoophq/alcatraz/releases/download"
 // trusting checksums.txt at download time) is what makes the download
 // verifiable.
 var libraryChecksums = map[string]string{
-	// Populated when the libpf-release workflow publishes the first
-	// artifact set, e.g.:
-	//	"darwin-arm64": "<sha256 of libpf-darwin-arm64.dylib>",
-	//	"darwin-amd64": "<sha256 of libpf-darwin-amd64.dylib>",
-	//	"linux-amd64":  "<sha256 of libpf-linux-amd64.so>",
-	//	"linux-arm64":  "<sha256 of libpf-linux-arm64.so>",
+	// libpf-v1: built from localai-org/privacy-filter.cpp@735a6c2 by the
+	// libpf-release workflow (run 28973430209).
+	"darwin-arm64": "5b7aedb042244ce0ae6424e2dd9ad5400d251180e316539bd4022125596ad76b",
+	"darwin-amd64": "a1cb3be9c0b851d5440ac5ece2a9fa3a61298bdd4a8bf864673feb71987fe097",
+	"linux-amd64":  "c1fe627e825f5dc31fdcd0a686aac85f8b9a7238c5846bdea73adec8b189c280",
+	"linux-arm64":  "a97f7a2b36edbc3dfbefae68b701b1002a43f2401c9ae3c4f934393f9f55f5a3",
 }
 
 // libraryArtifactName returns the release asset name for a platform, e.g.
