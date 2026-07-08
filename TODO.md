@@ -39,7 +39,8 @@ lives in a **separate module** so importers of the core never pull the dep.
       File an issue/PR; once fixed upstream the ASCII-fold workaround can be
       retired.
 - [x] `pfilter` module (separate module): privacy-filter.cpp backend over
-      purego FFI (no cgo — cross-compiles everywhere, stub on non-darwin/linux).
+      purego FFI (no cgo — cross-compiles everywhere; the dlopen path builds
+      on 64-bit darwin/linux, everything else gets a clean "unsupported" stub).
       PII-specialized GGUF models (8 categories base, 54 multilingual), byte
       offsets straight from the runtime, GPU via `Config.Device`, long inputs
       via `Config.WindowTokens`. Live test gated by `ALCATRAZ_PF_LIVE=1` +

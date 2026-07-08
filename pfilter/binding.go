@@ -22,37 +22,6 @@ type classifier interface {
 	close() error
 }
 
-// pfEntity mirrors pf.h's pf_entity on 64-bit platforms:
-//
-//	typedef struct {
-//	    int32_t      start;
-//	    int32_t      end;
-//	    float        score;
-//	    const char * label;
-//	} pf_entity;
-//
-// The padding field covers the 4 bytes the compiler inserts so the label
-// pointer is 8-byte aligned (sizeof == 24, alignof == 8).
-type pfEntity struct {
-	start int32
-	end   int32
-	score float32
-	_     int32
-	label *byte
-}
-
-// goString copies a NUL-terminated C string into a Go string. p may be nil.
-func goString(p *byte) string {
-	if p == nil {
-		return ""
-	}
-	n := 0
-	for *(*byte)(unsafe.Add(unsafe.Pointer(p), n)) != 0 {
-		n++
-	}
-	return string(unsafe.Slice(p, n))
-}
-
 // ctxPool hands out pf_ctx handles to concurrent classify calls. pf.h does
 // not document a single pf_ctx as thread-safe, so each handle serves one
 // call at a time; independent contexts run in parallel. The channel is the

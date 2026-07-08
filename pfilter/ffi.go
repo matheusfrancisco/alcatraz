@@ -1,4 +1,7 @@
-//go:build darwin || linux
+// The pfEntity mirror below hardcodes the 64-bit pf_entity layout (8-byte
+// label pointer, 4 bytes of padding before it), so this FFI path is
+// restricted to 64-bit platforms; everything else gets ffi_stub.go.
+//go:build (darwin || linux) && (amd64 || arm64)
 
 package pfilter
 
@@ -29,6 +32,38 @@ var (
 	libsMu sync.Mutex
 	libs   = map[string]*pfLib{}
 )
+
+// pfEntity mirrors pf.h's pf_entity on the 64-bit platforms this file is
+// built for (see the build constraint above):
+//
+//	typedef struct {
+//	    int32_t      start;
+//	    int32_t      end;
+//	    float        score;
+//	    const char * label;
+//	} pf_entity;
+//
+// The padding field covers the 4 bytes the compiler inserts so the label
+// pointer is 8-byte aligned (sizeof == 24, alignof == 8).
+type pfEntity struct {
+	start int32
+	end   int32
+	score float32
+	_     int32
+	label *byte
+}
+
+// goString copies a NUL-terminated C string into a Go string. p may be nil.
+func goString(p *byte) string {
+	if p == nil {
+		return ""
+	}
+	n := 0
+	for *(*byte)(unsafe.Add(unsafe.Pointer(p), n)) != 0 {
+		n++
+	}
+	return string(unsafe.Slice(p, n))
+}
 
 // defaultLibraryNames are tried in order when no explicit path is given.
 func defaultLibraryNames() []string {
