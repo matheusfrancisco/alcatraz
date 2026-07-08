@@ -49,10 +49,11 @@ is a library you `go get` and invoke in-process.
   tomorrow.
 
 > [!NOTE]
-> **Detection is pattern-based only — there is no machine-learning engine yet.**
-> Entities that need a statistical model (`PERSON`, `LOCATION`, `NRP`) are not
-> detected today. This is planned, not fundamental — see the
-> [roadmap](#roadmap).
+> **The core is pattern-based.** Entities that need a statistical model
+> (`PERSON`, `LOCATION`, `NRP`, free-text `DATE_TIME`) are detected by the
+> optional **[`alcatraz/ner`](#statistical-ner-optional-module)** module,
+> which runs an ONNX NER model in-process — pure Go by default, no cgo. The
+> core stays dependency-free whether or not you use it.
 
 ---
 
@@ -108,8 +109,8 @@ for _, r := range results {
 Every built-in detects a **language-independent** structured identifier — an
 IBAN or a Thai national ID looks the same in any surrounding text — so the
 complete set is active under whichever language an engine is built with. (The
-language key is retained for future language-specific recognizers such as
-ML/NER.)
+language key exists for language-specific recognizers, such as the `ner`
+module's model-backed recognizer.)
 
 ---
 
@@ -148,8 +149,118 @@ reg.Add("en", analyzer.NewPatternRecognizer(
 eng := analyzer.NewEngine(reg, []string{"en"})
 ```
 
-The `Recognizer` interface is the seam for a future ML/NER backend; nothing in
-the framework assumes regex.
+The `Recognizer` interface is the seam for statistical backends too; nothing
+in the framework assumes regex. The `alcatraz/ner` module (below) plugs in
+through the same interface.
+
+## Statistical NER (optional module)
+
+Free-text entities — `PERSON`, `LOCATION`, `NRP`, `DATE_TIME` — need a model,
+not a regex. The **`alcatraz/ner`** module runs an ONNX token-classification
+model in-process via [hugot](https://github.com/knights-analytics/hugot). Like
+`lookaround`, it is a *separate module*: importing it is the only way to pull
+in the model runtime, and the default backend is pure Go — no cgo, no shared
+libraries. (For maximum throughput, build with hugot's ONNX Runtime backend:
+`-tags ORT`.)
+
+```bash
+go get github.com/hoophq/alcatraz/ner   # requires Go 1.26+
+```
+
+```go
+import "github.com/hoophq/alcatraz/ner"
+
+nlp, err := ner.New(ctx, ner.DefaultConfig()) // downloads the model on first use
+if err != nil { ... }
+defer nlp.Close()
+
+reg := analyzer.NewRegistry("en")
+recognizers.LoadDefaults(reg, "en")   // the 45 pattern recognizers
+reg.Add("en", nlp.Recognizer("en"))   // + statistical NER
+
+eng := analyzer.NewEngine(reg, []string{"en"})
+eng.SetNlpEngine(nlp) // model runs once per Analyze, shared with all recognizers
+
+results := eng.Analyze("My name is John Smith, email john@example.com", alcatraz.Options{})
+// PERSON "John Smith" (model) + EMAIL_ADDRESS "john@example.com" (pattern)
+```
+
+Design notes:
+
+- **One inference pass per `Analyze` call.** `SetNlpEngine` makes the engine
+  run the model once and share the resulting artifacts with every recognizer
+  that consumes them (`analyzer.ArtifactRecognizer`). Without it, the NER
+  recognizer still works — it just runs the model itself.
+- **Zero cost when unused.** The pattern-only path never touches the model;
+  an inference failure degrades to pattern-only results.
+- **Presidio-compatible entity names.** Model labels are mapped through
+  `ner.Config.LabelMapping` (defaults mirror Presidio: `PER`→`PERSON`,
+  `LOC`/`GPE`→`LOCATION`, `NORP`→`NRP`, `DATE`/`TIME`→`DATE_TIME`;
+  `ORGANIZATION` and CoNLL `MISC` are dropped by default as false-positive
+  prone). Point `Config.Model` at any ONNX token-classification export on
+  Hugging Face, or `Config.ModelPath` at a local directory.
+- **Byte offsets, guaranteed.** Model spans are mapped back to byte offsets
+  in the original text, so `text[r.Start:r.End] == r.Text` holds for NER
+  results too, including multi-byte input.
+
+### Alternative backend: privacy-filter.cpp (`pfilter`)
+
+The **`alcatraz/pfilter`** module binds
+[privacy-filter.cpp](https://github.com/localai-org/privacy-filter.cpp) — the
+GGML runtime for the `openai-privacy-filter` PII model family — as a second
+`analyzer.NlpEngine` implementation. Compared to the `ner` module it trades
+setup effort for a **PII-specialized model** (8 categories in the base model,
+54 across 16 languages in the multilingual fine-tune, vs. generic
+person/location NER), **long-document support** (near-linear banded
+attention; 131k-token inputs with halo windowing) and **GPU inference**
+(CUDA/Vulkan).
+
+The binding is FFI via [purego](https://github.com/ebitengine/purego) — no
+cgo, the module cross-compiles like plain Go — but at runtime it needs the
+`libpf` shared library and a GGUF model file. Neither requires a manual
+build: `EnsureLibrary` downloads a prebuilt, sha256-pinned `libpf` for your
+platform, and `EnsureModel` downloads a GGUF (pre-converted:
+[LocalAI-io/privacy-filter-GGUF](https://huggingface.co/LocalAI-io/privacy-filter-GGUF))
+verified against its published checksum. Both cache under the user cache dir.
+
+```go
+import "github.com/hoophq/alcatraz/pfilter"
+
+// One-time setup, no cmake, no clone: fetch libpf + a model (verified).
+if _, err := pfilter.EnsureLibrary(ctx); err != nil { ... }
+model, err := pfilter.EnsureModel(ctx, pfilter.ModelQ8) // ~1.6 GB, cached
+if err != nil { ... }
+
+// Library resolution: Config.Library, else $PF_LIBRARY, else the
+// EnsureLibrary cache, else system paths.
+nlp, err := pfilter.New(pfilter.DefaultConfig(model))
+if err != nil { ... }
+defer nlp.Close()
+
+reg.Add("en", nlp.Recognizer("en"))
+eng.SetNlpEngine(nlp) // same seam, same one-pass sharing as the ner module
+```
+
+To build `libpf` from source instead (e.g. for CUDA/Vulkan), `pfilter/dist`
+has a CMake wrapper that produces one self-contained shared library from a
+privacy-filter.cpp checkout:
+
+```bash
+git clone --recursive https://github.com/localai-org/privacy-filter.cpp
+cmake -S pfilter/dist -B build -DPF_SOURCE_DIR=$PWD/privacy-filter.cpp \
+      -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+# -> build/libpf.dylib (macOS) / build/libpf.so (Linux); point $PF_LIBRARY at it
+```
+
+Default label mapping: `private_person`→`PERSON`,
+`private_address`→`LOCATION`, `private_email`→`EMAIL_ADDRESS`,
+`private_phone`→`PHONE_NUMBER`, `private_date`→`DATE_TIME`,
+`private_url`→`URL`, plus `ACCOUNT_NUMBER` and `SECRET`. Because the model
+shares entity names with the pattern recognizers, overlapping detections
+(e.g. an email found by both) collapse in the engine's same-type dedup.
+Unmapped labels from the multilingual model surface as
+SCREAMING_SNAKE_CASE of the model label; drop them via
+`Config.LabelsToIgnore`.
 
 ## Advanced matching: lookahead & lookbehind
 
@@ -214,14 +325,14 @@ core, so results compose seamlessly through the same `Engine`.
 
 ## What Alcatraz is — and isn't
 
-Alcatraz is a **pattern engine**: regexes plus checksum validators, verified
-against the schemes each identifier actually uses. That makes it precise on
-structured identifiers and honest about the rest:
+Alcatraz is a **pattern engine** at its core: regexes plus checksum
+validators, verified against the schemes each identifier actually uses. That
+makes it precise on structured identifiers and honest about the rest:
 
-- **No ML engine yet.** Free-text entities (`PERSON`, `LOCATION`, `NRP`) need
-  a statistical model and are not emitted, even though constants exist for
-  them. The `analyzer.Recognizer` interface is the integration seam — see the
-  roadmap below.
+- **ML is opt-in, not built-in.** Free-text entities (`PERSON`, `LOCATION`,
+  `NRP`) require the separate [`ner` module](#statistical-ner-optional-module);
+  the core alone does not emit them. Statistical detection is probabilistic —
+  treat NER scores as confidence, not verification.
 - **The default threshold is 0.** Some recognizers are intentionally
   low-confidence (e.g. `US_BANK_NUMBER` at 0.05 for any 8–17 digit run). Set
   `Options.Threshold` to trade recall for precision.
@@ -234,10 +345,15 @@ structured identifiers and honest about the rest:
 
 - [x] 45 pattern recognizers, 25 checksum-validated
 - [x] Opt-in `lookaround` module — true lookaround without polluting the core
+- [x] ML/NER backend for `PERSON`, `LOCATION`, `NRP` — opt-in `ner` module,
+      same pattern as `lookaround`; one shared inference pass per `Analyze`
+- [x] `pfilter` module — privacy-filter.cpp (GGML) backend: PII-specialized
+      models, long documents, GPU; purego FFI, no cgo
 - [ ] Context-word score boosting (raise a match's confidence when related
-      words appear near the span)
-- [ ] ML/NER backend for `PERSON`, `LOCATION`, `NRP` — shipped as a separate
-      module, same pattern as `lookaround`
+      words appear near the span — the shared `NlpArtifacts` tokens are the
+      input for this)
+- [ ] Zero-shot PII models (GLiNER-class): user-defined entity types at
+      runtime, no retraining
 - [ ] Optional LLM-backed detection/validation — separate module, explicit
       opt-in
 - [ ] Precision/recall benchmark suite against a labeled corpus
@@ -250,10 +366,15 @@ See [TODO.md](TODO.md) for the detailed plan.
 alcatraz.go        Public entry point: NewEngine + re-exported types.
 entities/          Canonical entity-type identifier constants.
 analyzer/          Framework: Result, dedup, Recognizer, Pattern, Matcher,
-                   PatternRecognizer, Registry, Engine, allow list.
+                   PatternRecognizer, Registry, Engine, allow list, and the
+                   NLP seam (NlpEngine, NlpArtifacts, ArtifactRecognizer).
 recognizers/       The 45 built-in recognizers, checksum helpers, loader.
 lookaround/        Optional, separate module: regexp2-backed Matcher for
                    lookahead/lookbehind in user-configured patterns.
+ner/               Optional, separate module: statistical NER (PERSON,
+                   LOCATION, NRP, DATE_TIME) via an in-process ONNX model.
+pfilter/           Optional, separate module: PII-specialized NER via
+                   privacy-filter.cpp (GGUF models, purego FFI, no cgo).
 ```
 
 ## Tests
@@ -261,7 +382,19 @@ lookaround/        Optional, separate module: regexp2-backed Matcher for
 ```bash
 go test ./...                    # core
 cd lookaround && go test ./...   # lookaround module
+cd ner && go test ./...          # ner module (unit tests, no model needed)
+cd ner && ALCATRAZ_NER_LIVE=1 go test ./...   # + end-to-end (downloads model)
+cd pfilter && go test ./...      # pfilter module (unit tests, no lib needed)
+cd pfilter && ALCATRAZ_PF_LIVE=1 PF_LIBRARY=/path/libpf.dylib \
+  PF_MODEL=/path/privacy-filter-q8.gguf go test ./...   # + end-to-end
 ```
+
+CI runs the unit tests of all four modules on every push (`test.yml`). The
+live end-to-end model tests run in `ml-live.yml` — on PRs touching the ML
+modules, weekly, and on demand — with the built `libpf` and the GGUF cached
+between runs. Prebuilt `libpf` binaries are produced by the manual
+`libpf-release.yml` workflow and published as `libpf-vN` GitHub releases,
+which is what `pfilter.EnsureLibrary` downloads.
 
 ---
 

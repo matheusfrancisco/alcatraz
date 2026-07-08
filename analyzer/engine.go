@@ -27,6 +27,7 @@ type Engine struct {
 	registry  *Registry
 	threshold float64
 	languages []string
+	nlp       NlpEngine
 }
 
 // NewEngine builds an engine over the given registry. languages records the
@@ -42,6 +43,13 @@ func NewEngine(registry *Registry, languages []string) *Engine {
 // SetThreshold sets the default score threshold applied when Options.Threshold
 // is nil.
 func (e *Engine) SetThreshold(t float64) { e.threshold = t }
+
+// SetNlpEngine attaches an NLP backend. When set, Analyze runs it at most
+// once per call and only when an applicable recognizer implements
+// ArtifactRecognizer and shares the resulting NlpArtifacts with every such
+// recognizer. Without it, ArtifactRecognizers fall back to their plain
+// Analyze method. Call during setup, before the engine is used concurrently.
+func (e *Engine) SetNlpEngine(n NlpEngine) { e.nlp = n }
 
 // Languages returns the engine's configured languages.
 func (e *Engine) Languages() []string { return append([]string(nil), e.languages...) }
@@ -64,8 +72,28 @@ func (e *Engine) Analyze(text string, o Options) []Result {
 		lang = "en"
 	}
 
+	recs := e.registry.Recognizers(lang, o.Entities)
+
+	// One shared NLP pass: run the backend only when a recognizer will
+	// actually consume the artifacts, so the pattern-only path pays nothing.
+	var artifacts *NlpArtifacts
+	if e.nlp != nil {
+		for _, rec := range recs {
+			if _, ok := rec.(ArtifactRecognizer); ok {
+				// An inference failure degrades to pattern-only analysis
+				// rather than failing the whole call.
+				artifacts, _ = e.nlp.ProcessText(text, lang)
+				break
+			}
+		}
+	}
+
 	var all []Result
-	for _, rec := range e.registry.Recognizers(lang, o.Entities) {
+	for _, rec := range recs {
+		if ar, ok := rec.(ArtifactRecognizer); ok && artifacts != nil {
+			all = append(all, ar.AnalyzeWithArtifacts(text, o.Entities, artifacts)...)
+			continue
+		}
 		all = append(all, rec.Analyze(text, o.Entities)...)
 	}
 

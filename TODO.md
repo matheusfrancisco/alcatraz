@@ -1,15 +1,15 @@
 # TODO — Roadmap
 
-Alcatraz today is **pattern-based only** (regex + checksum/format validators).
-It has **no machine-learning engine, no NER, and no LLM** integration yet. This
-file tracks the work to add them.
+Alcatraz's core is **pattern-based** (regex + checksum/format validators).
+Statistical NER shipped as the opt-in **`alcatraz/ner`** module; LLM-backed
+detection is still to come. This file tracks the remaining work.
 
-The architecture already anticipates this: every detector implements the
-`analyzer.Recognizer` interface (`analyzer/recognizer.go`), which is the single
-seam where statistical and LLM-backed backends plug in — no engine rewrite
-required. The unsupported entity constants (`entities.Person`,
-`entities.Location`, `entities.NRP`) already exist; they just have no recognizer
-emitting them.
+The architecture seam: every detector implements `analyzer.Recognizer`
+(`analyzer/recognizer.go`), and detectors that consume a shared NLP pass
+additionally implement `analyzer.ArtifactRecognizer` (`analyzer/nlp.go`). An
+`analyzer.NlpEngine` attached via `Engine.SetNlpEngine` runs **once per
+Analyze call** and its `NlpArtifacts` are shared by every artifact-aware
+recognizer — no duplicate inference, zero cost on the pattern-only path.
 
 Guiding principle (same as the `lookaround` module): **keep the core
 dependency-free and linear-time.** Any heavy runtime (ONNX, an LLM SDK, etc.)
@@ -17,30 +17,72 @@ lives in a **separate module** so importers of the core never pull the dep.
 
 ## Machine-learning / NER engine
 
-- [ ] Define an `NERecognizer` implementing `analyzer.Recognizer` that emits
-      `PERSON`, `LOCATION`, `NRP` (and other span-based entities).
-- [ ] Pick an inference path that keeps the core clean:
-  - [ ] In-process ONNX (e.g. `onnxruntime_go`) loading a quantized NER model, or
-  - [ ] An out-of-process model server (gRPC/HTTP sidecar) so the runtime stays
-        optional. Either way, ship it as a **separate module**, mirroring
-        `alcatraz/lookaround`.
-- [ ] Tokenization + offset mapping: convert model token spans back to **byte**
-      offsets into the original text (the whole library is byte-indexed — reuse
-      the rune→byte approach from `lookaround`).
-- [ ] Map model labels → `entities.*` and calibrate per-label scores onto the
-      0.0–1.0 scale the engine uses.
-- [ ] Per-language models wired into the `Registry` via `SupportedLanguage()`
-      (today every built-in is language-independent and registered under `en`).
-- [ ] Tests + a small labeled fixture corpus with expected spans/scores.
+- [x] NLP seam in the core: `NlpEngine`, `NlpArtifacts`, `ArtifactRecognizer`
+      and `Engine.SetNlpEngine` — single shared inference pass per Analyze,
+      lazy (skipped entirely when no artifact recognizer applies), degrades
+      to pattern-only on inference failure.
+- [x] `ner` module (separate module, mirrors `lookaround`): hugot-backed
+      ONNX token-classification engine, pure-Go backend by default (no cgo),
+      `-tags ORT` for ONNX Runtime throughput.
+- [x] Emits `PERSON`, `LOCATION`, `NRP`, `DATE_TIME` with Presidio-compatible
+      label mapping (`PER`→`PERSON`, `GPE`→`LOCATION`, `NORP`→`NRP`, …);
+      `ORGANIZATION` and CoNLL `MISC` ignored by default, low-score
+      multiplier and ignore list configurable via `ner.Config`.
+- [x] Byte-offset guarantee: model spans are remapped so
+      `text[r.Start:r.End] == r.Text` holds on multi-byte input. (The pure-Go
+      tokenizer's span tracking miscounts multi-byte runes — see the upstream
+      note below — so the model runs on an ASCII-folded rendering and spans
+      are mapped back through the fold table; `ner/offsets.go`.)
+- [ ] Upstream: go-huggingface `hftokenizer` BertNormalizer builds its
+      normalized→original offset table with one entry per **rune** instead of
+      per **byte**, shifting all subsequent token spans on multi-byte input.
+      File an issue/PR; once fixed upstream the ASCII-fold workaround can be
+      retired.
+- [x] `pfilter` module (separate module): privacy-filter.cpp backend over
+      purego FFI (no cgo — cross-compiles everywhere, stub on non-darwin/linux).
+      PII-specialized GGUF models (8 categories base, 54 multilingual), byte
+      offsets straight from the runtime, GPU via `Config.Device`, long inputs
+      via `Config.WindowTokens`. Live test gated by `ALCATRAZ_PF_LIVE=1` +
+      `PF_LIBRARY` + `PF_MODEL`.
+- [x] `pfilter`: binding validated end to end against a real `libpf`
+      (built via the `pfilter/dist` CMake wrapper) + the q8 GGUF —
+      `TestLivePrivacyFilter` passes, offsets hold on multi-byte input.
+- [x] `pfilter` distribution: `EnsureLibrary` (prebuilt, sha256-pinned
+      `libpf` from the `libpf-vN` GitHub release; built by the manual
+      `libpf-release.yml` workflow) and `EnsureModel` (GGUF from Hugging
+      Face, verified against the published LFS sha256) — users need neither
+      cmake nor a manual download. `pfilter/dist` builds one self-contained
+      shared library (ggml linked statically, force-loaded pf archive).
+- [ ] `pfilter`: publish the first `libpf-v1` release (run
+      `libpf-release.yml`), then pin its checksums.txt values in
+      `pfilter/download.go:libraryChecksums`. Until then `EnsureLibrary`
+      returns "no prebuilt libpf" and users build via `pfilter/dist`.
+- [x] `pfilter`: ctx pool instead of one mutex-guarded pf_ctx —
+      `Config.PoolSize` (default 1) contexts behind a channel pool; classify
+      calls run in parallel up to the pool size, Close waits for in-flight
+      calls. Memory scales with PoolSize (each pf_ctx loads the model).
+- [ ] Per-language model routing: one `ner.Engine` per language wired through
+      `SupportedLanguage()` (today: one model per engine, registered per
+      language by the caller).
+- [ ] Zero-shot PII models (GLiNER-class, e.g. `knowledgator/gliner-pii-edge`):
+      runtime-defined entity types without retraining. Needs custom span
+      decoding against the ONNX graph (not a plain token-classification
+      pipeline).
 
-## Context-aware scoring (precision prerequisite for NER)
+## Context-aware scoring (precision follow-up)
 
 - [ ] Activate the currently-inert context words: `PatternRecognizer.WithContext`
-      stores words but does nothing. Implement context-based score enhancement
-      (boost a match when context words appear near the span).
-- [ ] Define cross-recognizer overlap handling: `analyzer.RemoveDuplicates` only
+      stores words but does nothing. Implement context-based score boosting
+      fed from the shared `NlpArtifacts.Tokens` (Presidio boosts +0.35 when a
+      recognizer's context words appear near the span; plain lowercase token
+      matching is a fine v1, lemmas later).
+- [ ] Populate `NlpArtifacts.Tokens` in the `ner` module (hugot's aggregated
+      output currently yields entity spans only).
+- [ ] Cross-recognizer overlap handling: `analyzer.RemoveDuplicates` only
       de-duplicates **same-entity** overlaps today. Decide how an NER `PERSON`
-      span and a pattern `EMAIL_ADDRESS` span interact when they overlap.
+      span and a pattern `EMAIL_ADDRESS` span interact when they overlap
+      (proposed rule: a checksum-validated pattern result suppresses an
+      overlapping statistical span).
 
 ## LLM-based detection / validation
 
@@ -58,8 +100,11 @@ lives in a **separate module** so importers of the core never pull the dep.
 ## Cross-cutting
 
 - [ ] Precision/recall benchmark suite against a labeled dataset so each backend's
-      contribution is measurable and regressions are caught.
-- [ ] `NewEngine`/`Options` plumbing to enable/disable the ML and LLM backends
-      without code changes.
-- [ ] Extend the README "Extending" section with an ML/NER example once the first
-      backend lands, and update the "Limitations" note.
+      contribution is measurable and regressions are caught (the `ner` live test
+      fixture is a seed, not a benchmark).
+- [x] CI: unit tests for all four modules on every push (`test.yml` matrix);
+      live model tests (`ALCATRAZ_NER_LIVE=1`, `ALCATRAZ_PF_LIVE=1`) in
+      `ml-live.yml` — PRs touching ML modules, weekly schedule, manual
+      dispatch — with `libpf` build and GGUF/ONNX model caches.
+- [ ] Extend the README "Extending" section with a custom-model `ner.Config`
+      example once model routing lands.

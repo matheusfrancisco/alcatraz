@@ -1,0 +1,149 @@
+# Builds self-contained libpf shared libraries (privacy-filter.cpp + ggml,
+# CPU-only, via the pfilter/dist CMake wrapper) for every supported platform
+# and publishes them as a "libpf-vN" GitHub release. pfilter.EnsureLibrary
+# downloads these artifacts at runtime.
+#
+# Manual, deliberate process (workflow_dispatch): after a run, copy the
+# sha256 values from the published checksums.txt into
+# pfilter/download.go:libraryChecksums (and bump libraryVersion) in a
+# reviewed PR — the Go code only trusts hashes pinned in source.
+#
+# The tag namespace "libpf-v*" is disjoint from the module's semver tags
+# (vX.Y.Z, lookaround/vX.Y.Z, ...), so these releases are invisible to
+# `go get` and to the Auto Release workflow's version scan.
+name: libpf release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (libpf-vN)"
+        required: true
+        default: "libpf-v1"
+      pf_ref:
+        description: "privacy-filter.cpp ref to build"
+        required: true
+        default: "735a6c28607ee82afc3a670383f41b55266a3b9a"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,     artifact: libpf-darwin-arm64.dylib }
+          - { os: macos-15-intel,   artifact: libpf-darwin-amd64.dylib }
+          - { os: ubuntu-latest,    artifact: libpf-linux-amd64.so }
+          - { os: ubuntu-24.04-arm, artifact: libpf-linux-arm64.so }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: pfilter/go.sum
+
+      - name: Fetch privacy-filter.cpp
+        env:
+          PF_REF: ${{ inputs.pf_ref }}
+        run: |
+          git clone https://github.com/localai-org/privacy-filter.cpp pf-src
+          git -C pf-src checkout "$PF_REF"
+          git -C pf-src submodule update --init --recursive --depth 1
+
+      - name: Build
+        run: |
+          # Portable CPU build: no -march=native. On x86-64, AVX2/FMA/F16C is
+          # the distribution baseline (any CPU from ~2013 on). The single-file
+          # artifact rules out ggml's GGML_CPU_ALL_VARIANTS runtime dispatch,
+          # which requires separate backend .so files.
+          extra=""
+          case "${{ matrix.artifact }}" in
+            *amd64*) extra="-DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON" ;;
+          esac
+          cmake -S pfilter/dist -B pf-build \
+            -DPF_SOURCE_DIR="$PWD/pf-src" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF $extra
+          cmake --build pf-build -j4
+
+      - name: Package
+        run: |
+          mkdir -p out
+          case "${{ matrix.artifact }}" in
+            *.dylib) built=pf-build/libpf.dylib ;;
+            *)       built=pf-build/libpf.so ;;
+          esac
+          cp "$built" "out/${{ matrix.artifact }}"
+          # Ad-hoc signature: required on arm64 macOS for dlopen to accept
+          # the binary at all.
+          if [[ "${{ matrix.artifact }}" == *.dylib ]]; then
+            codesign --force -s - "out/${{ matrix.artifact }}"
+          fi
+
+      - name: Smoke test (dlopen + ABI check)
+        working-directory: pfilter
+        env:
+          PF_LIBRARY: ${{ github.workspace }}/out/${{ matrix.artifact }}
+        run: |
+          # loadLibrary dlopens the artifact and validates pf_abi_version;
+          # pf_load failing on a nonexistent GGUF proves the symbols resolve.
+          cat > /tmp/pf_smoke_test.go <<'EOF'
+          package pfilter
+
+          import (
+          	"strings"
+          	"testing"
+          )
+
+          func TestArtifactSmoke(t *testing.T) {
+          	_, err := New(DefaultConfig("/nonexistent.gguf"))
+          	if err == nil {
+          		t.Fatal("expected pf_load to fail on a nonexistent GGUF")
+          	}
+          	if strings.Contains(err.Error(), "could not load privacy-filter.cpp shared library") {
+          		t.Fatalf("dlopen of the built artifact failed: %v", err)
+          	}
+          	t.Logf("dlopen + ABI check OK; pf_load failed as expected: %v", err)
+          }
+          EOF
+          cp /tmp/pf_smoke_test.go .
+          go test -v -run TestArtifactSmoke .
+          rm pf_smoke_test.go
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum libpf-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          PF_REF: ${{ inputs.pf_ref }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$VERSION — prebuilt libpf" \
+            --notes "Self-contained privacy-filter.cpp shared libraries (CPU-only) built from localai-org/privacy-filter.cpp@${PF_REF} via pfilter/dist. Consumed by pfilter.EnsureLibrary; after publishing, pin the checksums.txt values in pfilter/download.go."

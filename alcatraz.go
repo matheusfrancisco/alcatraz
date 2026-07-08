@@ -8,11 +8,12 @@
 //		fmt.Println(hit.EntityType, hit.Text, hit.Score)
 //	}
 //
-// Detection is purely pattern-based (regular expressions plus checksum/format
-// validators). Free-text entities that require a statistical model — PERSON,
-// LOCATION, NRP — are intentionally out of scope for now; the Recognizer
-// interface in the analyzer subpackage is the extension point for adding an
-// ML/NER backend later.
+// Detection in this package is pattern-based (regular expressions plus
+// checksum/format validators). Free-text entities that require a statistical
+// model — PERSON, LOCATION, NRP — are provided by the optional
+// github.com/hoophq/alcatraz/ner module, which plugs in through the
+// Recognizer and NlpEngine interfaces in the analyzer subpackage; the core
+// stays dependency-free.
 package alcatraz
 
 import (
