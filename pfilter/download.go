@@ -65,9 +65,11 @@ var modelArtifacts = map[string]modelArtifact{
 
 // EnsureModel returns the local path of a privacy-filter GGUF, downloading
 // it into the user cache dir (~/.cache/alcatraz/models or the platform
-// equivalent) on first use and verifying the pinned sha256 before the file
-// is trusted. variant is one of the Model* constants. The download is large
-// (1.6–2.8 GB) — pass a cancellable ctx if you need to bound it.
+// equivalent) on first use. The pinned sha256 is verified on every call —
+// at download time and again on cache hits — so a corrupted cache entry is
+// deleted and re-fetched instead of trusted. variant is one of the Model*
+// constants. The download is large (1.6–2.8 GB) — pass a cancellable ctx if
+// you need to bound it.
 func EnsureModel(ctx context.Context, variant string) (string, error) {
 	art, ok := modelArtifacts[variant]
 	if !ok {
@@ -78,7 +80,7 @@ func EnsureModel(ctx context.Context, variant string) (string, error) {
 		return "", err
 	}
 	dest := filepath.Join(dir, filepath.Base(art.url))
-	if _, err := os.Stat(dest); err == nil {
+	if cachedFileValid(dest, art.sha256) {
 		return dest, nil
 	}
 	if err := download(ctx, art.url, dest, art.sha256, 0o644); err != nil {
@@ -133,7 +135,9 @@ func cachedLibraryPath() (string, error) {
 
 // EnsureLibrary returns the local path of a prebuilt privacy-filter.cpp
 // shared library for this platform, downloading it from the alcatraz GitHub
-// release on first use and verifying its pinned sha256. Once cached, New
+// release on first use. The pinned sha256 is verified on every call — at
+// download time and again on cache hits — so a corrupted or tampered cache
+// entry is deleted and re-fetched instead of dlopen'ed. Once cached, New
 // finds it without any configuration (loadLibrary checks the cache path);
 // the returned path can also be set explicitly as Config.Library.
 //
@@ -150,7 +154,7 @@ func EnsureLibrary(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(dest); err == nil {
+	if cachedFileValid(dest, sum) {
 		return dest, nil
 	}
 	url := libraryBaseURL + "/" + libraryVersion + "/" + libraryArtifactName(runtime.GOOS, runtime.GOARCH)
@@ -158,6 +162,33 @@ func EnsureLibrary(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("pfilter: downloading libpf: %w", err)
 	}
 	return dest, nil
+}
+
+// cachedFileValid reports whether path exists and still matches the pinned
+// sha256 — cache hits are re-verified on every Ensure call, so an entry
+// corrupted after download (disk fault, truncation, tampering) is caught
+// even though it was verified when it landed. A mismatched file is deleted,
+// which both triggers a fresh download here and keeps loadLibrary's direct
+// cache-path probe from dlopen-ing it.
+//
+// For the GGUF models this hashes 1.6–2.8 GB (~1 s with hardware SHA-256) —
+// small next to loading the model, but not free; pass Config.ModelPath
+// straight to New to skip EnsureModel entirely if that matters.
+func cachedFileValid(path, wantSHA256 string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return false
+	}
+	if hex.EncodeToString(hasher.Sum(nil)) == wantSHA256 {
+		return true
+	}
+	os.Remove(path)
+	return false
 }
 
 // cacheDir returns (creating if needed) a subdirectory of the user cache

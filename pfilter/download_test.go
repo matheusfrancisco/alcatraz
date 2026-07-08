@@ -158,6 +158,87 @@ func TestEnsureLibrary(t *testing.T) {
 	}
 }
 
+func TestCachedFileValid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "artifact")
+	payload := []byte("payload")
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !cachedFileValid(path, sha256Hex(payload)) {
+		t.Error("intact file must validate")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("intact file must survive validation: %v", err)
+	}
+
+	if cachedFileValid(filepath.Join(dir, "missing"), sha256Hex(payload)) {
+		t.Error("missing file must not validate")
+	}
+
+	if err := os.WriteFile(path, []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cachedFileValid(path, sha256Hex(payload)) {
+		t.Error("tampered file must not validate")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("tampered file must be deleted, stat err: %v", err)
+	}
+}
+
+func TestEnsureLibraryRedownloadsCorruptedCache(t *testing.T) {
+	useTempCache(t)
+	key := runtime.GOOS + "-" + runtime.GOARCH
+	payload := []byte("real shared library bytes")
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Write(payload)
+	}))
+	defer srv.Close()
+
+	oldBase := libraryBaseURL
+	oldSum, hadSum := libraryChecksums[key]
+	libraryBaseURL = srv.URL
+	libraryChecksums[key] = sha256Hex(payload)
+	t.Cleanup(func() {
+		libraryBaseURL = oldBase
+		if hadSum {
+			libraryChecksums[key] = oldSum
+		} else {
+			delete(libraryChecksums, key)
+		}
+	})
+
+	path, err := EnsureLibrary(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureLibrary: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("initial download made %d requests, want 1", requests)
+	}
+
+	// Corrupt the cached file; the next call must detect it, delete it and
+	// download a fresh verified copy rather than returning the bad bytes.
+	if err := os.WriteFile(path, []byte("bitrot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	again, err := EnsureLibrary(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureLibrary after corruption: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("corrupted cache made %d total requests, want 2 (re-download)", requests)
+	}
+	got, err := os.ReadFile(again)
+	if err != nil || string(got) != string(payload) {
+		t.Fatalf("re-downloaded library = %q, %v", got, err)
+	}
+}
+
 func TestEnsureLibraryUnsupportedPlatform(t *testing.T) {
 	key := runtime.GOOS + "-" + runtime.GOARCH
 	if _, ok := libraryChecksums[key]; ok {
