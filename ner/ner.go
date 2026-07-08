@@ -42,7 +42,12 @@ import (
 // hugot's guidance a single pipeline may be called from multiple goroutines,
 // so Engine is safe for concurrent use after construction.
 type Engine struct {
-	ctx      context.Context
+	// runCtx is used for inference calls. It is derived from New's ctx
+	// with context.WithoutCancel: the construction ctx bounds the model
+	// download and session setup only, and cancelling it afterwards must
+	// not poison every future ProcessText. The engine's lifetime is
+	// governed by Close, not by a context.
+	runCtx   context.Context
 	session  *hugot.Session
 	pipeline *pipelines.TokenClassificationPipeline
 	cfg      Config
@@ -51,6 +56,9 @@ type Engine struct {
 // New loads (downloading first if needed) the configured model and fails
 // fast on any model problem, so a constructed Engine can always run. Zero
 // fields of cfg fall back to DefaultConfig values.
+//
+// ctx bounds construction only (model download, session setup); cancelling
+// it after New returns does not affect the engine.
 func New(ctx context.Context, cfg Config) (*Engine, error) {
 	def := DefaultConfig()
 	if cfg.Model == "" && cfg.ModelPath == "" {
@@ -72,7 +80,11 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 		}
 	}
 
-	session, err := hugot.NewGoSession(ctx)
+	// hugot's session keeps the ctx it was created with and uses it for
+	// inference, so it must not inherit the caller's cancellation either —
+	// only the model download above is bound to the construction ctx.
+	runCtx := context.WithoutCancel(ctx)
+	session, err := hugot.NewGoSession(runCtx)
 	if err != nil {
 		return nil, fmt.Errorf("ner: creating hugot session: %w", err)
 	}
@@ -91,7 +103,7 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("ner: creating token classification pipeline: %w", err)
 	}
 
-	return &Engine{ctx: ctx, session: session, pipeline: pipeline, cfg: cfg}, nil
+	return &Engine{runCtx: runCtx, session: session, pipeline: pipeline, cfg: cfg}, nil
 }
 
 // ensureModel returns the local path of cfg.Model, downloading it from
@@ -133,7 +145,7 @@ func (e *Engine) Config() Config { return e.cfg }
 // input.
 func (e *Engine) ProcessText(text, language string) (*analyzer.NlpArtifacts, error) {
 	folded, foldOffsets := foldASCII(text)
-	out, err := e.pipeline.RunPipeline(e.ctx, []string{folded})
+	out, err := e.pipeline.RunPipeline(e.runCtx, []string{folded})
 	if err != nil {
 		return nil, err
 	}

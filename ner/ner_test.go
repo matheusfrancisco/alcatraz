@@ -195,7 +195,12 @@ func TestLiveNER(t *testing.T) {
 		t.Skip("set ALCATRAZ_NER_LIVE=1 to run the live model test")
 	}
 
-	nlp, err := New(context.Background(), DefaultConfig())
+	// Construct with a cancellable ctx and cancel it right after New: the
+	// ctx bounds construction only, so inference below must be unaffected
+	// (the engine's lifetime is governed by Close, not the ctx).
+	ctx, cancel := context.WithCancel(context.Background())
+	nlp, err := New(ctx, DefaultConfig())
+	cancel()
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
