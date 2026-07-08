@@ -19,7 +19,7 @@ type Doc struct {
 // SizeClasses and Densities define the canonical group ordering used in
 // reports, so every harness emits groups in the same order.
 var (
-	SizeClasses = []string{"100B", "1KB", "10KB"}
+	SizeClasses = []string{"100B", "1KB", "10KB", "1MB"}
 	Densities   = []string{"none", "sparse", "dense"}
 )
 
@@ -33,7 +33,8 @@ func Load(path string) ([]Doc, error) {
 
 	var docs []Doc
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
+	// A 1MB-text doc serializes to a JSON line larger than 1MB; allow up to 8MB.
+	sc.Buffer(make([]byte, 0, 1<<20), 8<<20)
 	for sc.Scan() {
 		var d Doc
 		if err := json.Unmarshal(sc.Bytes(), &d); err != nil {

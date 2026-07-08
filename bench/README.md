@@ -39,9 +39,9 @@ uv pip install https://github.com/explosion/spacy-models/releases/download/en_co
 ```bash
 cd bench
 
-# 1. Speed
+# 1. Speed (Python side takes ~25 min at 2 iterations, dominated by the 1MB groups)
 go run ./cmd/benchgo -mode bench -iterations 20 > results-go.json
-(cd python && uv run bench_presidio.py --mode bench --iterations 5) > results-py-slim.json
+(cd python && uv run bench_presidio.py --mode bench --iterations 2) > results-py-slim.json
 ./compare.py speed results-go.json results-py-slim.json
 
 # 2. Detection parity (velocity numbers are only fair if coverage is comparable)
@@ -71,10 +71,12 @@ go run ./cmd/benchgo -mode bench -entity CREDIT_CARD -entity EMAIL_ADDRESS > res
 
 - **Engine construction is excluded** from the timed loop; a full warm-up
   pass runs first. `BenchmarkNewEngine` measures construction separately.
-- The corpus is deterministic (seed 42): 180 docs across a
-  {100B, 1KB, 10KB} x {none, sparse, dense} matrix. Seeded PII passes real
-  checksums (Luhn cards, mod-11 CPF, mod-97 IBAN), so validator paths are
-  exercised the way real data exercises them.
+- The corpus is deterministic (seed 42): 186 docs across a
+  {100B, 1KB, 10KB, 1MB} x {none, sparse, dense} matrix. Seeded PII passes
+  real checksums (Luhn cards, mod-11 CPF, mod-97 IBAN), so validator paths
+  are exercised the way real data exercises them. The 1MB groups carry
+  fewer docs (2 per group by default) — Presidio needs seconds to minutes
+  per megabyte-sized document, so a full-size group would take hours.
 - The `none` density rows matter most for real workloads — most production
   text has no PII, so scan-and-reject cost usually dominates.
 - Throughput is reported as **µs/doc and MB/s** so numbers transfer across

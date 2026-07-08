@@ -184,7 +184,20 @@ func main() {
 	flag.Parse()
 
 	g := &generator{rng: rand.New(rand.NewSource(*seed))}
-	sizes := map[string]int{"100B": 100, "1KB": 1024, "10KB": 10240}
+	sizes := map[string]int{"100B": 100, "1KB": 1024, "10KB": 10240, "1MB": 1 << 20}
+
+	// Large docs get fewer instances per group: at 1MB each, the default 20
+	// would balloon the corpus to ~60MB and make the Python side take hours.
+	docsFor := func(sizeBytes int) int {
+		if sizeBytes >= 1<<20 {
+			n := *perGroup / 10
+			if n < 2 {
+				n = 2
+			}
+			return n
+		}
+		return *perGroup
+	}
 
 	f, err := os.Create(*out)
 	if err != nil {
@@ -197,7 +210,7 @@ func main() {
 	n, total := 0, 0
 	for _, sc := range corpus.SizeClasses {
 		for _, den := range corpus.Densities {
-			for i := 0; i < *perGroup; i++ {
+			for i := 0; i < docsFor(sizes[sc]); i++ {
 				d := corpus.Doc{
 					ID:        fmt.Sprintf("%s-%s-%03d", sc, den, i),
 					SizeClass: sc,

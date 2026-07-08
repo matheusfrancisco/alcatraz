@@ -77,17 +77,66 @@ func (e *Engine) Analyze(text string, o Options) []Result {
 	// One shared NLP pass: run the backend only when a recognizer will
 	// actually consume the artifacts, so the pattern-only path pays nothing.
 	var artifacts *NlpArtifacts
-	if e.nlp != nil {
-		for _, rec := range recs {
-			if _, ok := rec.(ArtifactRecognizer); ok {
-				// An inference failure degrades to pattern-only analysis
-				// rather than failing the whole call.
-				artifacts, _ = e.nlp.ProcessText(text, lang)
-				break
+	if e.nlp != nil && wantsArtifacts(recs) {
+		// An inference failure degrades to pattern-only analysis rather
+		// than failing the whole call.
+		artifacts, _ = e.nlp.ProcessText(text, lang)
+	}
+
+	return e.analyzeWithArtifacts(text, o, recs, artifacts)
+}
+
+// AnalyzeBatch is Analyze over several texts at once, returning one result
+// slice per text in input order. When the configured NLP backend implements
+// BatchNlpEngine, the model runs a single inference call for the whole batch
+// instead of once per text — the per-text results are identical to Analyze,
+// only faster. Recognizers, threshold and allow list apply per text exactly
+// as in Analyze.
+func (e *Engine) AnalyzeBatch(texts []string, o Options) [][]Result {
+	lang := o.Language
+	if lang == "" {
+		lang = "en"
+	}
+
+	recs := e.registry.Recognizers(lang, o.Entities)
+
+	// One shared NLP pass for the whole batch when the backend supports it,
+	// otherwise one per text; a failed pass degrades that text to the
+	// pattern-only path, matching Analyze.
+	artifacts := make([]*NlpArtifacts, len(texts))
+	if e.nlp != nil && wantsArtifacts(recs) {
+		if batch, ok := e.nlp.(BatchNlpEngine); ok {
+			if got, err := batch.ProcessTexts(texts, lang); err == nil && len(got) == len(texts) {
+				artifacts = got
+			}
+		} else {
+			for i, text := range texts {
+				artifacts[i], _ = e.nlp.ProcessText(text, lang)
 			}
 		}
 	}
 
+	results := make([][]Result, len(texts))
+	for i, text := range texts {
+		results[i] = e.analyzeWithArtifacts(text, o, recs, artifacts[i])
+	}
+	return results
+}
+
+// wantsArtifacts reports whether any recognizer consumes shared NlpArtifacts.
+func wantsArtifacts(recs []Recognizer) bool {
+	for _, rec := range recs {
+		if _, ok := rec.(ArtifactRecognizer); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// analyzeWithArtifacts runs the recognizer/dedup/threshold/allow-list
+// pipeline for one text, feeding the shared artifacts (may be nil) to
+// artifact-aware recognizers.
+func (e *Engine) analyzeWithArtifacts(text string, o Options, recs []Recognizer, artifacts *NlpArtifacts) []Result {
 	var all []Result
 	for _, rec := range recs {
 		if ar, ok := rec.(ArtifactRecognizer); ok && artifacts != nil {

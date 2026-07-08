@@ -21,7 +21,7 @@ import sys
 import time
 from collections import defaultdict
 
-SIZE_CLASSES = ["100B", "1KB", "10KB"]
+SIZE_CLASSES = ["100B", "1KB", "10KB", "1MB"]
 DENSITIES = ["none", "sparse", "dense"]
 
 
@@ -42,7 +42,13 @@ def build_analyzer(engine_kind):
         nlp = SlimSpacyNlpEngine(
             models=[{"lang_code": "en", "model_name": "en_core_web_sm"}]
         )
-        return AnalyzerEngine(nlp_engine=nlp, supported_languages=["en"])
+        analyzer = AnalyzerEngine(nlp_engine=nlp, supported_languages=["en"])
+        # spaCy caps input at 1M chars to guard parser/NER memory blowups.
+        # The slim engine disables both, so raising it is safe — and needed
+        # for the corpus's 1MB documents.
+        for lang_nlp in nlp.nlp.values():
+            lang_nlp.max_length = 20_000_000
+        return analyzer
 
     # "full": whatever the default provider gives (spaCy NER per call).
     return AnalyzerEngine(supported_languages=["en"])

@@ -17,6 +17,31 @@ func (f *fakeNlpEngine) ProcessText(text, language string) (*NlpArtifacts, error
 	return f.artifacts, f.err
 }
 
+// fakeBatchNlpEngine implements BatchNlpEngine, returning per-text artifacts
+// keyed by the text itself and counting batch calls.
+type fakeBatchNlpEngine struct {
+	fakeNlpEngine
+	batchCalls int
+	perText    map[string]*NlpArtifacts
+	batchErr   error
+}
+
+func (f *fakeBatchNlpEngine) ProcessTexts(texts []string, language string) ([]*NlpArtifacts, error) {
+	f.batchCalls++
+	if f.batchErr != nil {
+		return nil, f.batchErr
+	}
+	out := make([]*NlpArtifacts, len(texts))
+	for i, t := range texts {
+		if a, ok := f.perText[t]; ok {
+			out[i] = a
+		} else {
+			out[i] = &NlpArtifacts{}
+		}
+	}
+	return out, nil
+}
+
 // fakeArtifactRecognizer emits the artifacts' spans, or nothing via plain
 // Analyze so tests can tell which path the engine took.
 type fakeArtifactRecognizer struct {
@@ -135,6 +160,81 @@ func TestEngineSharedArtifacts(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Fatalf("want no results, got %+v", got)
+		}
+	})
+
+	t.Run("AnalyzeBatch runs a batch engine once for all texts", func(t *testing.T) {
+		texts := []string{"call John Smith now", "meet in Berlin"}
+		nlp := &fakeBatchNlpEngine{perText: map[string]*NlpArtifacts{
+			texts[0]: {Ents: []NerSpan{person}},
+			texts[1]: {Ents: []NerSpan{{EntityType: "LOCATION", Start: 8, End: 14, Score: 0.9}}},
+		}}
+		a := &fakeArtifactRecognizer{name: "ner", entities: []string{"PERSON", "LOCATION"}}
+		eng := newNlpTestEngine(a)
+		eng.SetNlpEngine(nlp)
+
+		got := eng.AnalyzeBatch(texts, Options{})
+		if nlp.batchCalls != 1 || nlp.calls != 0 {
+			t.Errorf("batchCalls=%d calls=%d, want 1 and 0", nlp.batchCalls, nlp.calls)
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 result slices, got %d", len(got))
+		}
+		if len(got[0]) != 1 || got[0][0].Text != "John Smith" {
+			t.Errorf("text 0: want PERSON 'John Smith', got %+v", got[0])
+		}
+		if len(got[1]) != 1 || got[1][0].Text != "Berlin" {
+			t.Errorf("text 1: want LOCATION 'Berlin', got %+v", got[1])
+		}
+	})
+
+	t.Run("AnalyzeBatch matches per-text Analyze results", func(t *testing.T) {
+		texts := []string{"call John Smith now", "nothing here"}
+		nlp := &fakeBatchNlpEngine{perText: map[string]*NlpArtifacts{
+			texts[0]: {Ents: []NerSpan{person}},
+		}}
+		nlp.artifacts = &NlpArtifacts{Ents: []NerSpan{person}}
+		a := &fakeArtifactRecognizer{name: "ner", entities: []string{"PERSON"}}
+		eng := newNlpTestEngine(a)
+		eng.SetNlpEngine(nlp)
+
+		batch := eng.AnalyzeBatch(texts, Options{})
+		single := eng.Analyze(texts[0], Options{})
+		if len(batch[0]) != len(single) || batch[0][0] != single[0] {
+			t.Errorf("batch result %+v != single result %+v", batch[0], single)
+		}
+		if len(batch[1]) != 0 {
+			t.Errorf("text without entities: want none, got %+v", batch[1])
+		}
+	})
+
+	t.Run("AnalyzeBatch with non-batch engine falls back to per-text passes", func(t *testing.T) {
+		nlp := &fakeNlpEngine{artifacts: &NlpArtifacts{Ents: []NerSpan{person}}}
+		a := &fakeArtifactRecognizer{name: "ner", entities: []string{"PERSON"}}
+		eng := newNlpTestEngine(a)
+		eng.SetNlpEngine(nlp)
+
+		got := eng.AnalyzeBatch([]string{text, text}, Options{})
+		if nlp.calls != 2 {
+			t.Errorf("NLP engine ran %d times, want 2", nlp.calls)
+		}
+		if len(got) != 2 || len(got[0]) != 1 || len(got[1]) != 1 {
+			t.Fatalf("want one PERSON per text, got %+v", got)
+		}
+	})
+
+	t.Run("AnalyzeBatch batch failure degrades to plain Analyze", func(t *testing.T) {
+		nlp := &fakeBatchNlpEngine{batchErr: errors.New("model exploded")}
+		a := &fakeArtifactRecognizer{name: "ner", entities: []string{"PERSON"}}
+		eng := newNlpTestEngine(a)
+		eng.SetNlpEngine(nlp)
+
+		got := eng.AnalyzeBatch([]string{text, text}, Options{})
+		if a.plainAnalyzed != 2 {
+			t.Errorf("plain Analyze ran %d times, want 2", a.plainAnalyzed)
+		}
+		if len(got) != 2 || len(got[0]) != 0 || len(got[1]) != 0 {
+			t.Fatalf("want empty results, got %+v", got)
 		}
 	})
 

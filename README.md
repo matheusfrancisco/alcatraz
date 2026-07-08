@@ -380,21 +380,23 @@ makes it precise on structured identifiers and honest about the rest:
 
 The [`bench/`](bench/) directory holds a reproducible speed comparison
 against [Presidio](https://github.com/data-privacy-stack/presidio)'s Python
-analyzer. Both engines read the same generated corpus — 180 documents across
-a {100 B, 1 KB, 10 KB} × {no PII, sparse, dense} matrix, every seeded value
-passing its real checksum — and emit the same JSON schema, so results merge
-into one table.
+analyzer. Both engines read the same generated corpus — 186 documents across
+a {100 B, 1 KB, 10 KB, 1 MB} × {no PII, sparse, dense} matrix, every seeded
+value passing its real checksum — and emit the same JSON schema, so results
+merge into one table.
 
 Representative single-threaded run (Presidio configured with its slim
 tokenization-only NLP engine — the closest apples-to-apples with Alcatraz's
 pattern-only core; its default spaCy-NER pipeline is slower still):
 
-| Corpus group | Alcatraz µs/doc | Presidio µs/doc | Speedup |
+| Corpus group | Alcatraz ms/doc | Presidio ms/doc | Speedup |
 |--------------|----------------:|----------------:|--------:|
-| 100 B, no PII |             82 |           8,819 |   ~108x |
-| 1 KB, no PII  |            775 |          15,034 |    ~19x |
-| 10 KB, no PII |          7,835 |          89,105 |    ~11x |
-| 10 KB, dense  |          8,623 |         119,652 |    ~14x |
+| 100 B, no PII |           0.09 |             8.5 |   ~100x |
+| 1 KB, no PII  |           0.80 |            15.2 |    ~19x |
+| 10 KB, no PII |           8.0  |            84.3 |    ~11x |
+| 10 KB, dense  |           8.7  |           116.1 |    ~13x |
+| 1 MB, no PII  |          840   |         7,999   |    ~10x |
+| 1 MB, dense   |        1,521   |       159,237   |   ~105x |
 
 Speed is only half the story: a parity check diffs the detections of both
 engines on the same corpus. On the shared entity types the two agree
