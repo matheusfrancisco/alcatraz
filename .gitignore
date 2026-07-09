@@ -1,2 +1,6 @@
 # Local checkout used to build libpf (see pfilter/dist); never committed.
 /privacy-filter.cpp/
+
+# Local native libraries for ORT builds of the ner module (libtokenizers.a,
+# libonnxruntime); never committed.
+/.tmp-ort/

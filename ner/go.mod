@@ -7,6 +7,7 @@ go 1.26
 require github.com/hoophq/alcatraz v0.0.0
 
 require (
+	github.com/gomlx/go-huggingface v0.3.5
 	github.com/knights-analytics/hugot v0.7.5
 	golang.org/x/text v0.37.0
 )
@@ -18,7 +19,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gomlx/exceptions v0.0.3 // indirect
-	github.com/gomlx/go-huggingface v0.3.5 // indirect
 	github.com/gomlx/go-xla v0.2.2 // indirect
 	github.com/gomlx/gomlx v0.27.3 // indirect
 	github.com/gomlx/onnx-gomlx v0.4.2 // indirect

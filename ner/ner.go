@@ -3,11 +3,43 @@
 // recognizers cannot express, using an ONNX token-classification model run
 // in-process via hugot.
 //
+// Texts of any length are supported: input beyond the model's token limit is
+// split into overlapping windows that are batched through the model and
+// merged back (see windows.go), so entities deep inside large texts are
+// detected instead of being truncated away. Inference shapes are padded to a
+// small set of buckets (Config.BatchBuckets/SequenceBuckets), bounding JIT
+// compilation to a few dozen programs regardless of corpus variety.
+//
 // It lives in a separate module on purpose (mirroring alcatraz/lookaround):
 // importing it is the only way to pull in the model runtime, so the alcatraz
 // core stays dependency-free. The default hugot backend is pure Go — no cgo,
-// no shared libraries. For higher throughput, build with hugot's ORT backend
-// ("-tags ORT") and an ONNX Runtime shared library.
+// no shared libraries.
+//
+// # Faster inference
+//
+// The pure-Go backend is the portability floor, not the speed ceiling. For
+// large corpora, Config.Backend selects a faster hugot backend and
+// Config.Accelerator adds a GPU execution provider on top:
+//
+//	Backend      build tags   runtime dependency          speed (indicative)
+//	"go"         none         none                        1x (baseline)
+//	"ort"        -tags ORT    libonnxruntime.{so,dylib}   ~5-10x on CPU
+//	"ort"+accel  -tags ORT    + CoreML / CUDA / DirectML  beyond that
+//	"xla"        -tags XLA    PJRT plugin (CPU/CUDA/TPU)  similar to ORT
+//
+//	cfg := ner.DefaultConfig()
+//	cfg.Backend = ner.BackendORT          // requires a -tags ORT build
+//	cfg.Accelerator = ner.AcceleratorCoreML // Apple GPU/Neural Engine
+//	nlp, err := ner.New(ctx, cfg)
+//
+// The ORT and XLA build tags imply cgo, so accelerated binaries cannot be
+// cross-compiled the way pure-Go ones can, and they load a native shared
+// library at runtime (on macOS, "brew install onnxruntime" is found
+// automatically; elsewhere set Config.ORTLibraryPath). Selecting a backend
+// that is not compiled in makes New fail with an error saying which build
+// tag is missing, so a pure-Go binary degrades loudly, not silently. The
+// whole pipeline — windowing, batching, span merging — behaves identically
+// on every backend.
 //
 // The Engine implements analyzer.NlpEngine, so an analyzer.Engine configured
 // with SetNlpEngine runs the model once per Analyze call and shares the
@@ -30,8 +62,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/gomlx/go-huggingface/tokenizers/api"
 	"github.com/hoophq/alcatraz/analyzer"
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -51,6 +85,21 @@ type Engine struct {
 	session  *hugot.Session
 	pipeline *pipelines.TokenClassificationPipeline
 	cfg      Config
+
+	// winTok is the tokenizer used to size inference windows (see
+	// windows.go): the pipeline's own pure-Go tokenizer, or a standalone
+	// one loaded from the model's tokenizer.json on rust-tokenizer builds.
+	// Nil only if neither could be resolved (byte-window fallback).
+	winTok api.Tokenizer
+
+	// tokenBudget is the maximum tokens (special tokens included) a single
+	// inference row may hold: the smaller of the largest sequence bucket
+	// and the model's position limit. Longer texts are split into
+	// overlapping windows of at most this many tokens (see windows.go).
+	tokenBudget int
+	// maxBatch is the inference sub-batch size: the largest batch bucket.
+	// ProcessTexts never sends more rows than this in one model call.
+	maxBatch int
 }
 
 // New loads (downloading first if needed) the configured model and fails
@@ -70,6 +119,24 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 			cfg.LabelsToIgnore = def.LabelsToIgnore
 		}
 	}
+	if cfg.BatchBuckets == nil {
+		cfg.BatchBuckets = def.BatchBuckets
+	}
+	if cfg.SequenceBuckets == nil {
+		cfg.SequenceBuckets = def.SequenceBuckets
+	}
+	sort.Ints(cfg.BatchBuckets)
+	sort.Ints(cfg.SequenceBuckets)
+	// The buckets feed padding shapes, the inference sub-batch size and the
+	// window token budget, all of which must be positive — a non-positive
+	// batch bucket would stall ProcessTexts' batching loop outright. The
+	// slices are sorted, so checking the first entry covers them all.
+	if len(cfg.BatchBuckets) > 0 && cfg.BatchBuckets[0] <= 0 {
+		return nil, fmt.Errorf("ner: BatchBuckets entries must be positive, got %v", cfg.BatchBuckets)
+	}
+	if len(cfg.SequenceBuckets) > 0 && cfg.SequenceBuckets[0] <= 0 {
+		return nil, fmt.Errorf("ner: SequenceBuckets entries must be positive, got %v", cfg.SequenceBuckets)
+	}
 
 	modelPath := cfg.ModelPath
 	if modelPath == "" {
@@ -84,7 +151,7 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	// inference, so it must not inherit the caller's cancellation either —
 	// only the model download above is bound to the construction ctx.
 	runCtx := context.WithoutCancel(ctx)
-	session, err := hugot.NewGoSession(runCtx)
+	session, err := newBackendSession(runCtx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ner: creating hugot session: %w", err)
 	}
@@ -103,7 +170,31 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("ner: creating token classification pipeline: %w", err)
 	}
 
-	return &Engine{runCtx: runCtx, session: session, pipeline: pipeline, cfg: cfg}, nil
+	tokenBudget := 0
+	if len(cfg.SequenceBuckets) > 0 {
+		tokenBudget = cfg.SequenceBuckets[len(cfg.SequenceBuckets)-1]
+	}
+	if m := pipeline.Model.MaxPositionEmbeddings; m > 0 && (tokenBudget == 0 || m < tokenBudget) {
+		tokenBudget = m
+	}
+	if tokenBudget == 0 {
+		// No bucket and no model limit declared: BERT-family default.
+		tokenBudget = 512
+	}
+	maxBatch := 32
+	if len(cfg.BatchBuckets) > 0 {
+		maxBatch = cfg.BatchBuckets[len(cfg.BatchBuckets)-1]
+	}
+
+	return &Engine{
+		runCtx:      runCtx,
+		session:     session,
+		pipeline:    pipeline,
+		cfg:         cfg,
+		winTok:      windowTokenizer(pipeline, modelPath),
+		tokenBudget: tokenBudget,
+		maxBatch:    maxBatch,
+	}, nil
 }
 
 // ensureModel returns the local path of cfg.Model, downloading it from
@@ -152,10 +243,14 @@ func (e *Engine) ProcessText(text, language string) (*analyzer.NlpArtifacts, err
 }
 
 // ProcessTexts implements analyzer.BatchNlpEngine: it runs the model over all
-// texts in one inference call and returns one NlpArtifacts per text, in input
-// order. Batching amortizes the per-call tokenization and graph overhead, so
-// it is substantially faster than calling ProcessText in a loop; the spans of
-// each text carry the same byte-offset guarantee as ProcessText.
+// texts in batched inference calls and returns one NlpArtifacts per text, in
+// input order. Batching amortizes the per-call tokenization and graph
+// overhead, so it is substantially faster than calling ProcessText in a loop;
+// the spans of each text carry the same byte-offset guarantee as ProcessText.
+//
+// Texts longer than the model's token limit are split into overlapping
+// windows (see windows.go) and their spans merged, so entities anywhere in a
+// text of any length are detected — they are never truncated away.
 func (e *Engine) ProcessTexts(texts []string, language string) ([]*analyzer.NlpArtifacts, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -165,24 +260,64 @@ func (e *Engine) ProcessTexts(texts []string, language string) ([]*analyzer.NlpA
 	for i, text := range texts {
 		folded[i], foldOffsets[i] = foldASCII(text)
 	}
-	out, err := e.pipeline.RunPipeline(e.runCtx, folded)
-	if err != nil {
-		return nil, err
+
+	// One inference row per window. Short texts (the common case) produce
+	// exactly one row covering the whole text.
+	type inferenceRow struct {
+		textIdx int
+		offset  int // window start, in folded-text bytes
+		body    string
 	}
+	var rows []inferenceRow
+	for i := range texts {
+		for _, w := range e.windows(folded[i]) {
+			rows = append(rows, inferenceRow{i, w.start, folded[i][w.start:w.end]})
+		}
+	}
+
 	artifacts := make([]*analyzer.NlpArtifacts, len(texts))
 	for i := range texts {
 		artifacts[i] = &analyzer.NlpArtifacts{}
 	}
-	for i, ents := range out.Entities {
-		if i >= len(texts) {
-			break
+	windowed := make([]bool, len(texts))
+
+	for c := 0; c < len(rows); c += e.maxBatch {
+		chunk := rows[c:min(c+e.maxBatch, len(rows))]
+		bodies := make([]string, len(chunk))
+		for j, r := range chunk {
+			bodies[j] = r.body
 		}
-		for _, ent := range ents {
-			span, ok := e.toNerSpan(texts[i], foldOffsets[i], ent)
-			if !ok {
-				continue
+		out, err := e.pipeline.RunPipeline(e.runCtx, bodies)
+		if err != nil {
+			return nil, err
+		}
+		for j, ents := range out.Entities {
+			if j >= len(chunk) {
+				break
 			}
-			artifacts[i].Ents = append(artifacts[i].Ents, span)
+			row := chunk[j]
+			if row.offset > 0 {
+				windowed[row.textIdx] = true
+			}
+			for _, ent := range ents {
+				// Window-relative offsets → folded-text offsets; toNerSpan
+				// then remaps folded → original text.
+				ent.Start += uint(row.offset)
+				ent.End += uint(row.offset)
+				span, ok := e.toNerSpan(texts[row.textIdx], foldOffsets[row.textIdx], ent)
+				if !ok {
+					continue
+				}
+				artifacts[row.textIdx].Ents = append(artifacts[row.textIdx].Ents, span)
+			}
+		}
+	}
+
+	// Overlapping windows can report the same entity twice; single-window
+	// texts need no merge.
+	for i, a := range artifacts {
+		if windowed[i] {
+			a.Ents = mergeSpans(a.Ents)
 		}
 	}
 	return artifacts, nil
