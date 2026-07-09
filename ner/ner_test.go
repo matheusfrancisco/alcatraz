@@ -3,6 +3,7 @@ package ner
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/hoophq/alcatraz/analyzer"
@@ -190,16 +191,25 @@ func TestRecognizerWithArtifacts(t *testing.T) {
 
 // TestLiveNER downloads the default model (~250MB on first run) and checks
 // the full pipeline end to end. Gated behind ALCATRAZ_NER_LIVE=1.
+//
+// The backend is selectable so the same assertions verify every backend:
+// ALCATRAZ_NER_BACKEND=ort (with a -tags ORT build), ALCATRAZ_NER_ORT_LIB
+// pointing at the ONNX Runtime library if it is not in a standard location,
+// and ALCATRAZ_NER_ACCELERATOR=coreml/cuda for GPU execution providers.
 func TestLiveNER(t *testing.T) {
 	if os.Getenv("ALCATRAZ_NER_LIVE") != "1" {
 		t.Skip("set ALCATRAZ_NER_LIVE=1 to run the live model test")
 	}
+	cfg := DefaultConfig()
+	cfg.Backend = os.Getenv("ALCATRAZ_NER_BACKEND")
+	cfg.ORTLibraryPath = os.Getenv("ALCATRAZ_NER_ORT_LIB")
+	cfg.Accelerator = os.Getenv("ALCATRAZ_NER_ACCELERATOR")
 
 	// Construct with a cancellable ctx and cancel it right after New: the
 	// ctx bounds construction only, so inference below must be unaffected
 	// (the engine's lifetime is governed by Close, not the ctx).
 	ctx, cancel := context.WithCancel(context.Background())
-	nlp, err := New(ctx, DefaultConfig())
+	nlp, err := New(ctx, cfg)
 	cancel()
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -237,5 +247,25 @@ func TestLiveNER(t *testing.T) {
 			t.Errorf("offset invariant broken: [%d:%d] = %q, Text = %q",
 				r.Start, r.End, utf8Text[r.Start:r.End], r.Text)
 		}
+	}
+
+	// Windowed inference: a text far beyond the model's 512-token limit
+	// must still be analyzed in full — entities near the end used to be
+	// unreachable (inference failed outright on over-long input).
+	filler := strings.Repeat("the deployment pipeline ran and produced output logs without issues. ", 300)
+	long := filler + "Finally John Smith arrived in Berlin."
+	longArts, err := nlp.ProcessText(long, "en")
+	if err != nil {
+		t.Fatalf("ProcessText on long text: %v", err)
+	}
+	found := map[string]bool{}
+	for _, span := range longArts.Ents {
+		found[span.EntityType+":"+long[span.Start:span.End]] = true
+	}
+	if !found[entities.Person+":John Smith"] {
+		t.Errorf("long text: PERSON 'John Smith' not found (got %v)", found)
+	}
+	if !found[entities.Location+":Berlin"] {
+		t.Errorf("long text: LOCATION 'Berlin' not found (got %v)", found)
 	}
 }

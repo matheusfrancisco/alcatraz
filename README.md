@@ -195,8 +195,8 @@ not a regex. The **`alcatraz/ner`** module runs an ONNX token-classification
 model in-process via [hugot](https://github.com/knights-analytics/hugot). Like
 `lookaround`, it is a *separate module*: importing it is the only way to pull
 in the model runtime, and the default backend is pure Go — no cgo, no shared
-libraries. (For maximum throughput, build with hugot's ONNX Runtime backend:
-`-tags ORT`.)
+libraries. (For maximum throughput, including GPU, see
+[Faster inference](#faster-inference-ort-xla-and-gpu) below.)
 
 ```bash
 go get github.com/hoophq/alcatraz/ner   # requires Go 1.26+
@@ -237,6 +237,42 @@ Design notes:
 - **Byte offsets, guaranteed.** Model spans are mapped back to byte offsets
   in the original text, so `text[r.Start:r.End] == r.Text` holds for NER
   results too, including multi-byte input.
+
+### Faster inference: ORT, XLA and GPU
+
+The pure-Go backend is the zero-friction default, not the speed ceiling.
+`ner.Config.Backend` selects one of hugot's faster backends, and
+`ner.Config.Accelerator` adds a GPU execution provider on top:
+
+| `Config.Backend` | Build tags | Runtime dependency | Accelerators |
+|------------------|-----------|--------------------|--------------|
+| `"go"` (default) | none — pure Go, cross-compiles | none | — |
+| `"ort"` | `-tags ORT` (cgo + [libtokenizers.a](https://github.com/daulet/tokenizers/releases) at link time) | `libonnxruntime.{so,dylib}` ([releases](https://github.com/microsoft/onnxruntime/releases)) | `coreml` (Apple GPU/ANE), `cuda`, `directml` |
+| `"xla"` | `-tags XLA` (cgo) | PJRT plugin | `cuda` |
+
+```go
+cfg := ner.DefaultConfig()
+cfg.Backend = ner.BackendORT            // needs a -tags ORT build
+cfg.Accelerator = ner.AcceleratorCoreML // optional: Apple GPU/Neural Engine
+nlp, err := ner.New(ctx, cfg)
+```
+
+```bash
+# macOS: brew install onnxruntime — found automatically. Otherwise point
+# Config.ORTLibraryPath at the library (file or directory).
+CGO_LDFLAGS="-L/path/to/libtokenizers" go build -tags ORT .
+```
+
+The whole pipeline — windowing, batching, span merging — behaves identically
+on every backend, and a backend that is not compiled in fails `ner.New` with
+an error naming the missing build tag rather than degrading silently.
+Indicatively, ORT on CPU is ~5–10x faster than the pure-Go backend on batch
+workloads; CoreML/CUDA go beyond that. To compare on your hardware:
+
+```bash
+cd ner && ALCATRAZ_NER_LIVE=1 go test -bench LiveProcessTexts -benchtime 1x -run xxx .
+# and the same with ALCATRAZ_NER_BACKEND=ort under a -tags ORT build
+```
 
 ### Alternative backend: privacy-filter.cpp (`pfilter`)
 
