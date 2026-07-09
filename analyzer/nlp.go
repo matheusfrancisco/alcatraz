@@ -54,6 +54,17 @@ type NlpEngine interface {
 	ProcessText(text, language string) (*NlpArtifacts, error)
 }
 
+// BatchNlpEngine is an optional extension of NlpEngine for backends that can
+// process several texts in one inference call, which amortizes per-call
+// tokenization and graph overhead. Engine.AnalyzeBatch detects it by type
+// assertion and falls back to per-text ProcessText calls when absent.
+type BatchNlpEngine interface {
+	NlpEngine
+	// ProcessTexts runs the NLP pipeline over all texts and returns one
+	// NlpArtifacts per text, in input order.
+	ProcessTexts(texts []string, language string) ([]*NlpArtifacts, error)
+}
+
 // ArtifactRecognizer is an optional extension of Recognizer for detectors
 // that consume precomputed NlpArtifacts. The engine detects it by type
 // assertion: when an NlpEngine is configured (Engine.SetNlpEngine) and at

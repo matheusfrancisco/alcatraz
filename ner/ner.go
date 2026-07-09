@@ -144,21 +144,46 @@ func (e *Engine) Config() Config { return e.cfg }
 // so the alcatraz invariant text[Start:End] == matched span holds for any
 // input.
 func (e *Engine) ProcessText(text, language string) (*analyzer.NlpArtifacts, error) {
-	folded, foldOffsets := foldASCII(text)
-	out, err := e.pipeline.RunPipeline(e.runCtx, []string{folded})
+	all, err := e.ProcessTexts([]string{text}, language)
 	if err != nil {
 		return nil, err
 	}
-	artifacts := &analyzer.NlpArtifacts{}
-	if len(out.Entities) == 0 {
-		return artifacts, nil
+	return all[0], nil
+}
+
+// ProcessTexts implements analyzer.BatchNlpEngine: it runs the model over all
+// texts in one inference call and returns one NlpArtifacts per text, in input
+// order. Batching amortizes the per-call tokenization and graph overhead, so
+// it is substantially faster than calling ProcessText in a loop; the spans of
+// each text carry the same byte-offset guarantee as ProcessText.
+func (e *Engine) ProcessTexts(texts []string, language string) ([]*analyzer.NlpArtifacts, error) {
+	if len(texts) == 0 {
+		return nil, nil
 	}
-	for _, ent := range out.Entities[0] {
-		span, ok := e.toNerSpan(text, foldOffsets, ent)
-		if !ok {
-			continue
+	folded := make([]string, len(texts))
+	foldOffsets := make([][]int, len(texts))
+	for i, text := range texts {
+		folded[i], foldOffsets[i] = foldASCII(text)
+	}
+	out, err := e.pipeline.RunPipeline(e.runCtx, folded)
+	if err != nil {
+		return nil, err
+	}
+	artifacts := make([]*analyzer.NlpArtifacts, len(texts))
+	for i := range texts {
+		artifacts[i] = &analyzer.NlpArtifacts{}
+	}
+	for i, ents := range out.Entities {
+		if i >= len(texts) {
+			break
 		}
-		artifacts.Ents = append(artifacts.Ents, span)
+		for _, ent := range ents {
+			span, ok := e.toNerSpan(texts[i], foldOffsets[i], ent)
+			if !ok {
+				continue
+			}
+			artifacts[i].Ents = append(artifacts[i].Ents, span)
+		}
 	}
 	return artifacts, nil
 }

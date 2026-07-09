@@ -1,0 +1,5 @@
+corpus.jsonl
+results-*.json
+detections-*.jsonl
+python/.venv/
+python/uv.lock
