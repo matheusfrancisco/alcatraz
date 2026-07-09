@@ -120,6 +120,16 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 	sort.Ints(cfg.BatchBuckets)
 	sort.Ints(cfg.SequenceBuckets)
+	// The buckets feed padding shapes, the inference sub-batch size and the
+	// window token budget, all of which must be positive — a non-positive
+	// batch bucket would stall ProcessTexts' batching loop outright. The
+	// slices are sorted, so checking the first entry covers them all.
+	if len(cfg.BatchBuckets) > 0 && cfg.BatchBuckets[0] <= 0 {
+		return nil, fmt.Errorf("ner: BatchBuckets entries must be positive, got %v", cfg.BatchBuckets)
+	}
+	if len(cfg.SequenceBuckets) > 0 && cfg.SequenceBuckets[0] <= 0 {
+		return nil, fmt.Errorf("ner: SequenceBuckets entries must be positive, got %v", cfg.SequenceBuckets)
+	}
 
 	modelPath := cfg.ModelPath
 	if modelPath == "" {

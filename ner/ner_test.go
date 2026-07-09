@@ -189,6 +189,35 @@ func TestRecognizerWithArtifacts(t *testing.T) {
 	})
 }
 
+// TestNewRejectsNonPositiveBuckets guards ProcessTexts' batching loop, which
+// advances by the largest batch bucket: a non-positive value would make it
+// loop forever, and a non-positive sequence bucket would corrupt the window
+// token budget. New must reject both up front.
+func TestNewRejectsNonPositiveBuckets(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("zero batch bucket", func(t *testing.T) {
+		_, err := New(ctx, Config{ModelPath: t.TempDir(), BatchBuckets: []int{0}})
+		if err == nil || !strings.Contains(err.Error(), "BatchBuckets") {
+			t.Fatalf("err = %v, want BatchBuckets validation error", err)
+		}
+	})
+
+	t.Run("negative batch bucket among valid ones", func(t *testing.T) {
+		_, err := New(ctx, Config{ModelPath: t.TempDir(), BatchBuckets: []int{8, -1, 32}})
+		if err == nil || !strings.Contains(err.Error(), "BatchBuckets") {
+			t.Fatalf("err = %v, want BatchBuckets validation error", err)
+		}
+	})
+
+	t.Run("non-positive sequence bucket", func(t *testing.T) {
+		_, err := New(ctx, Config{ModelPath: t.TempDir(), SequenceBuckets: []int{-16, 128}})
+		if err == nil || !strings.Contains(err.Error(), "SequenceBuckets") {
+			t.Fatalf("err = %v, want SequenceBuckets validation error", err)
+		}
+	})
+}
+
 // TestLiveNER downloads the default model (~250MB on first run) and checks
 // the full pipeline end to end. Gated behind ALCATRAZ_NER_LIVE=1.
 //

@@ -107,7 +107,8 @@ type Config struct {
 	// compiled instead of one per distinct input shape — on varied corpora
 	// that turns hundreds of expensive graph compilations into a handful.
 	// Nil means DefaultConfig's buckets; an explicit empty slice disables
-	// bucketing (exact shapes, unbounded compilation cache).
+	// bucketing (exact shapes, unbounded compilation cache). Entries must
+	// be positive; New rejects zero or negative values.
 	//
 	// The largest BatchBuckets entry is also the engine's inference
 	// sub-batch size, and the largest SequenceBuckets entry caps the
