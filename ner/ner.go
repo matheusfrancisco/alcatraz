@@ -65,6 +65,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gomlx/go-huggingface/tokenizers/api"
 	"github.com/hoophq/alcatraz/analyzer"
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -84,6 +85,12 @@ type Engine struct {
 	session  *hugot.Session
 	pipeline *pipelines.TokenClassificationPipeline
 	cfg      Config
+
+	// winTok is the tokenizer used to size inference windows (see
+	// windows.go): the pipeline's own pure-Go tokenizer, or a standalone
+	// one loaded from the model's tokenizer.json on rust-tokenizer builds.
+	// Nil only if neither could be resolved (byte-window fallback).
+	winTok api.Tokenizer
 
 	// tokenBudget is the maximum tokens (special tokens included) a single
 	// inference row may hold: the smaller of the largest sequence bucket
@@ -184,6 +191,7 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 		session:     session,
 		pipeline:    pipeline,
 		cfg:         cfg,
+		winTok:      windowTokenizer(pipeline, modelPath),
 		tokenBudget: tokenBudget,
 		maxBatch:    maxBatch,
 	}, nil

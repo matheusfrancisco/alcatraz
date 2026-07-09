@@ -7,12 +7,24 @@ package ner
 // either fail inference outright (the pure-Go tokenizer applies no
 // truncation for token-classification pipelines) or are silently truncated
 // (the rust tokenizer), losing every entity past ~2KB of text.
+//
+// Window boundaries always come from a real tokenizer so every window
+// provably fits the token budget: the pipeline's own tokenizer on the
+// pure-Go backend, or a standalone pure-Go tokenizer loaded from the same
+// tokenizer.json on the rust-tokenizer backends (ORT/XLA), where the
+// pipeline's tokenizer cannot be introspected. Only if that load fails does
+// windowing fall back to byte-sized windows — sized so they cannot exceed
+// the budget either (see windows).
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/gomlx/go-huggingface/tokenizers/api"
+	"github.com/gomlx/go-huggingface/tokenizers/hftokenizer"
 	"github.com/hoophq/alcatraz/analyzer"
+	"github.com/knights-analytics/hugot/pipelines"
 )
 
 const (
@@ -22,12 +34,12 @@ const (
 	// the overlap; mergeSpans then drops the cut fragment.
 	windowOverlapTokens = 32
 
-	// fallbackBytesPerToken sizes byte-based windows when the tokenizer is
-	// not introspectable (rust tokenizer builds). Three bytes per token is
-	// conservative for prose (~4.5) without exploding the window count;
-	// the rust tokenizer truncates over-long windows instead of failing,
-	// so an underestimate degrades gracefully.
-	fallbackBytesPerToken = 3
+	// fallbackSpecialsSlack is how many tokens of the budget byte-fallback
+	// windows reserve for special tokens ([CLS]/[SEP] and friends).
+	fallbackSpecialsSlack = 8
+
+	// fallbackOverlapBytes is the overlap of byte-fallback windows.
+	fallbackOverlapBytes = 96
 )
 
 // textWindow is one model-sized slice of a folded text: byte offsets
@@ -39,23 +51,55 @@ type textWindow struct {
 // windows splits a folded text into inference-ready windows. Texts within
 // the model's token budget yield a single window covering the whole text.
 func (e *Engine) windows(folded string) []textWindow {
-	tk := e.goTokenizer()
-	if tk == nil {
-		size := e.tokenBudget * fallbackBytesPerToken
-		return byteWindows(len(folded), size, windowOverlapTokens*fallbackBytesPerToken)
+	if e.winTok != nil {
+		return tokenWindows(e.winTok, folded, e.tokenBudget)
 	}
-	return tokenWindows(tk, folded, e.tokenBudget)
+	// Last resort, when no windowing tokenizer could be loaded. Every
+	// non-special token covers at least one byte of text (token spans are
+	// non-empty and non-overlapping), so a window of tokenBudget-minus-
+	// slack *bytes* can never encode past the token budget. That hard
+	// guarantee costs efficiency — prose runs ~4.5 bytes per token, so
+	// these windows are ~4x smaller than necessary — which is why the
+	// tokenizer paths above are preferred.
+	size := e.tokenBudget - fallbackSpecialsSlack
+	return byteWindows(len(folded), size, fallbackOverlapBytes)
 }
 
-// goTokenizer returns the pipeline's tokenizer when it is the pure-Go
-// implementation (the default backend). Rust tokenizer builds return nil and
-// fall back to byte-estimate windows.
-func (e *Engine) goTokenizer() api.Tokenizer {
-	tk := e.pipeline.Model.Tokenizer
-	if tk == nil || tk.GoTokenizer == nil {
+// windowTokenizer resolves the tokenizer used to size windows: the
+// pipeline's tokenizer when it is the pure-Go implementation (the default
+// backend), otherwise — rust-tokenizer builds (ORT/XLA) — a standalone
+// pure-Go tokenizer loaded from the model's own tokenizer.json, which yields
+// the same token counts as the rust one (same tokenizer spec). Nil means no
+// tokenizer could be resolved; callers must fall back to byte windows.
+func windowTokenizer(pipeline *pipelines.TokenClassificationPipeline, modelPath string) api.Tokenizer {
+	if tk := pipeline.Model.Tokenizer; tk != nil && tk.GoTokenizer != nil {
+		return tk.GoTokenizer.Tokenizer
+	}
+	return loadWindowTokenizer(modelPath)
+}
+
+// loadWindowTokenizer loads a pure-Go tokenizer from the model directory's
+// tokenizer.json, configured like hugot configures its own Go tokenizer:
+// specials count against the budget, and tokenWindows needs spans plus the
+// special-tokens mask to separate content tokens from specials. Nil on any
+// failure.
+func loadWindowTokenizer(modelPath string) api.Tokenizer {
+	content, err := os.ReadFile(filepath.Join(modelPath, "tokenizer.json"))
+	if err != nil {
 		return nil
 	}
-	return tk.GoTokenizer.Tokenizer
+	tk, err := hftokenizer.NewFromContent(nil, content)
+	if err != nil {
+		return nil
+	}
+	if err := tk.With(api.EncodeOptions{
+		AddSpecialTokens:         true,
+		IncludeSpans:             true,
+		IncludeSpecialTokensMask: true,
+	}); err != nil {
+		return nil
+	}
+	return tk
 }
 
 // tokenWindows builds windows by tokenizing the text once and slicing the
